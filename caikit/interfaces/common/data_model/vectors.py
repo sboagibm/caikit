@@ -31,6 +31,8 @@ from caikit.core import DataObjectBase, dataobject
 from caikit.core.data_model import PACKAGE_COMMON
 from caikit.core.exceptions import error_handler
 
+from pydantic import ConfigDict
+
 log = alog.use_channel("DATAM")
 error = error_handler.get(log)
 
@@ -41,9 +43,13 @@ class PyFloatSequence(DataObjectBase):
     values: Annotated[List[float], FieldNumber(1)] = field(default_factory=list)
 
 
+class NpDataObjectBase(DataObjectBase):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
 @dataobject(PACKAGE_COMMON)
 @dataclass
-class NpFloat32Sequence(DataObjectBase):
+class NpFloat32Sequence(NpDataObjectBase):
     values: Annotated[List[np.float32], FieldNumber(1)]
 
     @classmethod
@@ -54,7 +60,7 @@ class NpFloat32Sequence(DataObjectBase):
 
 @dataobject(PACKAGE_COMMON)
 @dataclass
-class NpFloat64Sequence(DataObjectBase):
+class NpFloat64Sequence(NpDataObjectBase):
     values: Annotated[List[np.float64], FieldNumber(1)]
 
     @classmethod
@@ -65,7 +71,7 @@ class NpFloat64Sequence(DataObjectBase):
 
 @dataobject(PACKAGE_COMMON)
 @dataclass
-class Vector1D(DataObjectBase):
+class Vector1D(NpDataObjectBase):
     """Data representation for a 1 dimension vector of float-type data."""
 
     data: Annotated[

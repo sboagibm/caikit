@@ -19,7 +19,6 @@ model objects inline without manually defining the protobufs representation
 
 # Standard
 from enum import Enum
-from inspect import signature
 from typing import (
     Any,
     Callable,
@@ -33,32 +32,36 @@ from typing import (
     get_args,
     get_origin,
 )
-import dataclasses
 
 # Third Party
-from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from google.protobuf import struct_pb2
 from google.protobuf.internal.enum_type_wrapper import EnumTypeWrapper
-import numpy as np
+import pydantic
 
 # First Party
-from py_to_proto.dataclass_to_proto import PY_TO_PROTO_TYPES, DataclassConverter
+from py_to_proto.dataclass_to_proto import DataclassConverter
 import alog
-import py_to_proto
 
 # Local
 from ..exceptions import error_handler
 from . import enums
 from .base import DataBase, _DataBaseMetaClass
+
 from .json_dict import JsonDict
+
+from google.protobuf import descriptor as _descriptor
+
+from google.protobuf import struct_pb2
+
+import numpy as np
+
+from py_to_proto.dataclass_to_proto import PY_TO_PROTO_TYPES
 
 ## Globals #####################################################################
 
 log = alog.use_channel("SCHEMA")
 error = error_handler.get(log)
 
-# Type mapping for type hints in @dataobject classes
 DATAOBJECT_PY_TO_PROTO_TYPES = {
     JsonDict: struct_pb2.Struct,
     np.int32: _descriptor.FieldDescriptor.TYPE_INT32,
@@ -70,105 +73,21 @@ DATAOBJECT_PY_TO_PROTO_TYPES = {
     **PY_TO_PROTO_TYPES,
 }
 
+
 # Common package prefix
 CAIKIT_DATA_MODEL = "caikit_data_model"
+
+_USER_DEFINED_DEFAULTS = "__user_defined_defaults__"
 
 # Registry of auto-generated protos so that they can be rendered to .proto
 _AUTO_GEN_PROTO_CLASSES = []
 
-## Public ######################################################################
+DataObjectBase = pydantic.BaseModel
 
-
-class _DataObjectBaseMetaClass(_DataBaseMetaClass):
-    """This metaclass is used for the DataObject base class so that all data
-    objects can delay the creation of their proto class until after the
-    metaclass has been instantiated.
-    """
-
-    def __new__(mcs, name, bases, attrs):
-        """When instantiating a new DataObject class, the proto class will not
-        yet have been generated, but the set of fields will be known since the
-        class will be the raw input representation of a @dataclass
-        """
-
-        # Get the annotations that will go into the dataclass
-        if name != "DataObjectBase":
-            field_names = attrs.get("__annotations__")
-            parent_dataobjects: List[_DataBaseMetaClass] = [
-                base for base in bases if isinstance(base, _DataBaseMetaClass)
-            ]
-            field_name_sets = [base.fields for base in parent_dataobjects]
-            if field_names is not None:
-                field_name_sets = [field_names] + field_name_sets
-
-            # We need at least one field name set!
-            if not field_name_sets:
-                raise TypeError(
-                    "All DataObjectBase classes must follow dataclass syntax"
-                )
-
-            # Flatten the field names
-            field_names = {
-                field_name
-                for field_name_set in field_name_sets
-                for field_name in field_name_set
-            }
-            attrs[_DataBaseMetaClass._FWD_DECL_FIELDS] = field_names
-
-        # Delegate to the base metaclass
-        return super().__new__(mcs, name, bases, attrs)
-
-
-class DataObjectBase(DataBase, metaclass=_DataObjectBaseMetaClass):
-    """A DataObject is a data model class that is backed by a @dataclass.
-
-    Data model classes that use the @dataobject decorator must derive from this
-    base class.
-    """
-
-
-_DataObjectBaseT = TypeVar("_DataObjectBaseT", bound=Type[DataObjectBase])
+_DataObjectBaseT = TypeVar("_DataObjectBaseT", bound=Type[pydantic.BaseModel])
 
 
 def dataobject(*args, **kwargs) -> Callable[[_DataObjectBaseT], _DataObjectBaseT]:
-    """The @dataobject decorator can be used to define a Data Model object's
-    schema inline with the definition of the python class rather than needing to
-    bind to a pre-compiled protobufs class. For example:
-
-    @dataobject("foo.bar")
-    class MyDataObject(DataObjectBase):
-        '''My Custom Data Object'''
-        foo: str
-        bar: int
-
-    NOTE: The wrapped class must NOT inherit directly from DataBase. That
-        inheritance will be added by this decorator, but if it is written
-        directly, the metaclass that links protobufs to the class will be called
-        before this decorator can auto-gen the protobufs class.
-
-    The `dataobject` decorator will not provide tools with enough information
-    to perform type completion for constructions in an IDE, or static
-    typechecking.  In order to have that, the `dataclass` decorator
-    may optionally be added, with the slight overhead of wasted effort in
-    creating the "standard" __init__ function which then gets re-done by
-    @dataobject.  The `dataclass` must follow the `dataobject` decorator.  For example:
-
-    @dataobject("foo.bar")
-    @dataclass
-    class MyDataObject(DataObjectBase):
-        '''My Custom Data Object'''
-        foo: str
-        bar: int
-
-    Kwargs:
-        package:  str
-            The package name to use for the generated protobufs class
-
-    Returns:
-        decorator:  Callable[[Type], Type[DataBase]]
-            The decorator function that will wrap the given class
-    """
-
     def decorator(cls: _DataObjectBaseT) -> _DataObjectBaseT:
         # Make sure that the wrapped class does NOT inherit from DataBase
         error.value_check(
@@ -180,101 +99,6 @@ def dataobject(*args, **kwargs) -> Callable[[_DataObjectBaseT], _DataObjectBaseT
 
         # Add the package to the kwargs
         kwargs.setdefault("package", package)
-
-        # If it's not an enum, fill in any missing field defaults as None
-        # and make sure it's a dataclass
-        if not issubclass(cls, Enum):
-            # alog needs a stub file or some method of typing the monkey-patched methods.
-            # Meanwhile, disable the type-checker for those calls.
-            log.debug2("Wrapping data class %s", cls)  # type: ignore
-            user_defined_defaults = {}
-            data_class_fields = getattr(cls, "__dataclass_fields__", {})
-            for annotation in getattr(cls, "__annotations__", {}):
-
-                # Class Attribute default
-                defined_default = getattr(cls, annotation, dataclasses.MISSING)
-                if defined_default is dataclasses.MISSING:
-                    log.debug3("Setting None default attr for %s.%s", cls, annotation)
-                    setattr(cls, annotation, None)
-
-                    dataclass_defined_default = data_class_fields.get(
-                        annotation, dataclasses.MISSING
-                    )
-                    # If this class is a dataclass and this field has dataclass specific field
-                    # defaults then use those. Because of how dataclasses wrapping is you have
-                    # to check default and default_factory directly
-                    if dataclass_defined_default is not dataclasses.MISSING and (
-                        dataclass_defined_default.default is not dataclasses.MISSING
-                        or dataclass_defined_default.default_factory
-                        is not dataclasses.MISSING
-                    ):
-                        # Revert the nulling of the cls with the dataclass field
-                        setattr(cls, annotation, dataclass_defined_default)
-                        defined_default = dataclass_defined_default
-
-                        if isinstance(defined_default, Callable):
-                            callable_sig = signature(defined_default)
-                            error.value_check(
-                                "<COR95184430E>",
-                                len(callable_sig.parameters) == 0,
-                                "Callable dataclass default field must accept no parameters",
-                            )
-
-                # If this field has no available default then skip loop
-                if defined_default is dataclasses.MISSING:
-                    continue
-
-                # If this default is a dataclass field parse it
-                if isinstance(defined_default, dataclasses.Field):
-                    if defined_default.default != dataclasses.MISSING:
-                        defined_default = defined_default.default
-                    elif defined_default.default_factory != dataclasses.MISSING:
-                        defined_default = defined_default.default_factory
-                    else:
-                        defined_default = None
-
-                user_defined_defaults[annotation] = defined_default
-
-            # If the current __init__ is auto-generated by dataclass, remove
-            # it so that a new one is created with the new defaults
-            if _has_dataclass_init(cls):
-                log.debug3("Resetting default dataclass init")  # type: ignore
-                delattr(cls, "__init__")
-
-            # If dataclass is not already a dataclass then wrap it
-            cls = dataclasses.dataclass(repr=False)(cls)
-            setattr(
-                cls, _DataBaseMetaClass._USER_DEFINED_DEFAULTS, user_defined_defaults
-            )
-
-        descriptor = _dataobject_to_proto(dataclass_=cls, **kwargs)
-
-        # Create the message class from the dataclass
-        proto_class = py_to_proto.descriptor_to_message_class(descriptor)
-        _AUTO_GEN_PROTO_CLASSES.append(proto_class)
-
-        # Add enums to the global enums module
-        # (The type-checking gets too gnarly with google._upb._message.MessageMeta vs.
-        # the _message.Message class, so disable the type-checker for these right now.)
-        for enum_class in _get_all_enums(proto_class):  # type: ignore
-            log.debug2("Importing enum [%s]", enum_class.DESCRIPTOR.name)  # type: ignore
-            enums.import_enum(enum_class)
-
-        # Declare the merged class that binds DataBase to the wrapped class with
-        # this generated proto class
-        if not isinstance(proto_class, EnumTypeWrapper):
-            cls._proto_class = proto_class  # type: ignore
-            cls = _make_data_model_class(proto_class, cls)
-
-            # If this was a default-generated dataclass __init__ and there are
-            # any oneofs, we need to augment the __init__ to support kwargs for
-            # the individual fields
-            if _has_dataclass_init(cls) and cls._fields_oneofs_map:  # type: ignore
-                cls.__init__ = _make_oneof_init(cls)
-
-        else:
-            enums.import_enum(proto_class, cls)  # type: ignore
-            cls._proto_enum = proto_class  # type: ignore
 
         # Return the decorated class
         return cls
@@ -295,11 +119,6 @@ def dataobject(*args, **kwargs) -> Callable[[_DataObjectBaseT], _DataObjectBaseT
     return decorator
 
 
-def get_generated_proto_classes():
-    """Provide get access to the auto-gen classes"""
-    return _AUTO_GEN_PROTO_CLASSES
-
-
 def render_dataobject_protos(interfaces_dir: str):
     """Write out protobufs files for all proto classes generated from dataobjects
     to the target interfaces directory
@@ -307,8 +126,10 @@ def render_dataobject_protos(interfaces_dir: str):
     Args:
         interfaces_dir (str): The target directory (must already exist)
     """
-    for proto_class in _AUTO_GEN_PROTO_CLASSES:
-        proto_class.write_proto_file(interfaces_dir)
+    # for proto_class in _AUTO_GEN_PROTO_CLASSES:
+    #     proto_class.write_proto_file(interfaces_dir)
+    # TODO: implement render_dataobject_protos
+    raise AssertionError("render_dataobject_protos not yet implemented")
 
 
 def make_dataobject(
@@ -319,7 +140,7 @@ def make_dataobject(
     attrs: Optional[Dict[str, Any]] = None,
     proto_name: Optional[str] = None,
     **kwargs,
-) -> _DataObjectBaseMetaClass:
+) -> pydantic.BaseModel:
     """Factory function for creating net-new dataobject classes
 
     WARNING: This is a power-user feature that should be used with caution since
@@ -349,8 +170,8 @@ def make_dataobject(
     if proto_name is not None:
         kwargs["name"] = proto_name
     return dataobject(**kwargs)(
-        _DataObjectBaseMetaClass.__new__(
-            _DataObjectBaseMetaClass,
+        pydantic.BaseModel.__new__(
+            pydantic.BaseModel,
             name=name,
             bases=bases,
             attrs=attrs,
@@ -396,9 +217,7 @@ class _DataobjectConverter(DataclassConverter):
         """Get the names of any fields which are optional. This will be any
         field that has a user-defined default or is marked as Optional[]
         """
-        optional_fields = list(
-            getattr(entry, _DataBaseMetaClass._USER_DEFINED_DEFAULTS, {})
-        )
+        optional_fields = list(getattr(entry, _USER_DEFINED_DEFAULTS, {}))
         for field_name, field in entry.__dataclass_fields__.items():
             if (
                 field_name not in optional_fields
